@@ -500,14 +500,41 @@ private fun RecentItemCard(
             }
             Spacer(Modifier.width(dimensionResource(R.dimen.spacing_medium)))
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = item.itemName.ifBlank { "Unnamed item" },
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontSize = 15.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = item.itemName.ifBlank { "Unnamed item" },
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontSize = 15.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+
+                    Spacer(Modifier.width(6.dp))
+
+                    val syncColor = when (item.syncStatus) {
+                        SyncStatus.PENDING -> Color(0xFFFFA726)
+                        SyncStatus.SYNCING -> Color(0xFF42A5F5)
+                        SyncStatus.SYNCED -> Color(0xFF66BB6A)
+                    }
+
+                    Text(
+                        text = when (item.syncStatus) {
+                            SyncStatus.PENDING -> "● Pending"
+                            SyncStatus.SYNCING -> "● Syncing"
+                            SyncStatus.SYNCED -> "● Synced"
+                        },
+                        color = syncColor,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
                 Spacer(Modifier.height(2.dp))
                 Text(
                     text = "${item.room} • ${item.storageLocation.ifBlank { "No details" }}",
@@ -518,37 +545,16 @@ private fun RecentItemCard(
                 )
 
                 Spacer(Modifier.height(4.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Surface(
-                        color = if (isMissing) Color(0xFFFFEBEE) else Color(0xFFE8F5E9),
-                        shape = RoundedCornerShape(4.dp)
-                    ) {
-                        Text(
-                            text = if (isMissing) "⚠️ MISSING" else "✓ STORED",
-                            color = if (isMissing) Color(0xFFC62828) else Color(0xFF2E7D32),
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
-
-                    Spacer(Modifier.width(8.dp))
-
-                    val syncColor = when (item.syncStatus) {
-                        SyncStatus.PENDING -> Color(0xFFFFA726)
-                        SyncStatus.SYNCING -> Color(0xFF42A5F5)
-                        SyncStatus.SYNCED -> Color(0xFF66BB6A)
-                    }
-
+                Surface(
+                    color = if (isMissing) Color(0xFFFFEBEE) else Color(0xFFE8F5E9),
+                    shape = RoundedCornerShape(4.dp)
+                ) {
                     Text(
-                        text = when (item.syncStatus) {
-                            SyncStatus.PENDING -> "Pending"
-                            SyncStatus.SYNCING -> "Syncing"
-                            SyncStatus.SYNCED -> "Synced"
-                        },
-                        color = syncColor,
+                        text = if (isMissing) "⚠️ MISSING" else "✓ STORED",
+                        color = if (isMissing) Color(0xFFC62828) else Color(0xFF2E7D32),
                         fontSize = 10.sp,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                     )
                 }
             }

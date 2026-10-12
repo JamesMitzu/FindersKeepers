@@ -13,6 +13,8 @@ import com.example.finderskeepersapplication.data.remote.RemotePostsApi
 import com.example.finderskeepersapplication.domain.model.Resource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 class FindersKeepersRepository(
@@ -20,6 +22,8 @@ class FindersKeepersRepository(
     private val postsApi: RemotePostsApi,
     private val context: Context? = null
 ) {
+    private val syncMutex = Mutex()
+
     val localItems: Flow<List<ItemEntity>> = itemDao.getAllItems()
 
     suspend fun saveItem(item: ItemEntity) = withContext(Dispatchers.IO) {
@@ -51,57 +55,59 @@ class FindersKeepersRepository(
     }
 
     suspend fun syncPendingItems() = withContext(Dispatchers.IO) {
-        val pending = itemDao.getPendingItems()
-        for (local in pending) {
-            try {
-                itemDao.update(local.copy(syncStatus = SyncStatus.SYNCING))
+        syncMutex.withLock {
+            val pending = itemDao.getPendingItems()
+            for (local in pending) {
+                try {
+                    itemDao.update(local.copy(syncStatus = SyncStatus.SYNCING))
 
-                // 1) Upload image to Cloudinary if local imageUri exists and remote URL is not uploaded yet
-                var uploadedImageUrl = local.imageUrlRemote
-                if (uploadedImageUrl.isNullOrBlank() && !local.imageUri.isNullOrBlank() && context != null) {
-                    val uri = Uri.parse(local.imageUri)
-                    uploadedImageUrl = CloudinaryUploader.uploadImage(context, uri)
-                }
-
-                // 2) Sync record to remote API
-                val remoteReq = RemoteItem(
-                    id = local.remoteId,
-                    itemName = local.itemName,
-                    room = local.room,
-                    storageLocation = local.storageLocation,
-                    imageUrl = uploadedImageUrl,
-                    itemStatus = local.itemStatus.name,
-                    lastUpdated = local.lastUpdated
-                )
-
-                val assignedRemoteId: String? = if (local.remoteId.isNullOrBlank()) {
-                    try {
-                        val created = postsApi.createItem(remoteReq)
-                        created.id
-                    } catch (e: Exception) {
-                        null
+                    // 1) Upload image to Cloudinary if local imageUri exists and remote URL is not uploaded yet
+                    var uploadedImageUrl = local.imageUrlRemote
+                    if (uploadedImageUrl.isNullOrBlank() && !local.imageUri.isNullOrBlank() && context != null) {
+                        val uri = Uri.parse(local.imageUri)
+                        uploadedImageUrl = CloudinaryUploader.uploadImage(context, uri)
                     }
-                } else {
-                    try {
-                        val updated = postsApi.updateItem(local.remoteId, remoteReq)
-                        updated.id ?: local.remoteId
-                    } catch (e: Exception) {
-                        local.remoteId
-                    }
-                }
 
-                itemDao.update(
-                    local.copy(
-                        remoteId = assignedRemoteId ?: local.remoteId,
-                        imageUrlRemote = uploadedImageUrl,
-                        syncStatus = SyncStatus.SYNCED
+                    // 2) Sync record to remote API
+                    val remoteReq = RemoteItem(
+                        id = local.remoteId,
+                        itemName = local.itemName,
+                        room = local.room,
+                        storageLocation = local.storageLocation,
+                        imageUrl = uploadedImageUrl,
+                        itemStatus = local.itemStatus.name,
+                        lastUpdated = local.lastUpdated
                     )
-                )
-            } catch (e: Exception) {
-                itemDao.update(local.copy(syncStatus = SyncStatus.PENDING))
+
+                    val assignedRemoteId: String? = if (local.remoteId.isNullOrBlank()) {
+                        try {
+                            val created = postsApi.createItem(remoteReq)
+                            created.id
+                        } catch (e: Exception) {
+                            null
+                        }
+                    } else {
+                        try {
+                            val updated = postsApi.updateItem(local.remoteId, remoteReq)
+                            updated.id ?: local.remoteId
+                        } catch (e: Exception) {
+                            local.remoteId
+                        }
+                    }
+
+                    itemDao.update(
+                        local.copy(
+                            remoteId = assignedRemoteId ?: local.remoteId,
+                            imageUrlRemote = uploadedImageUrl,
+                            syncStatus = SyncStatus.SYNCED
+                        )
+                    )
+                } catch (e: Exception) {
+                    itemDao.update(local.copy(syncStatus = SyncStatus.PENDING))
+                }
             }
+            fetchRemoteItemsInternal()
         }
-        fetchRemoteItems()
     }
 
     suspend fun updateItemStatus(item: ItemEntity, newStatus: ItemStatus) = withContext(Dispatchers.IO) {
@@ -115,6 +121,12 @@ class FindersKeepersRepository(
     }
 
     suspend fun fetchRemoteItems() = withContext(Dispatchers.IO) {
+        syncMutex.withLock {
+            fetchRemoteItemsInternal()
+        }
+    }
+
+    private suspend fun fetchRemoteItemsInternal() {
         try {
             val remoteList = postsApi.getItems()
             for (remote in remoteList) {
