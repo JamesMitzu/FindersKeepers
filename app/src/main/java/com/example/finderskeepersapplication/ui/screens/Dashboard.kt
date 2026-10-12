@@ -3,6 +3,8 @@ package com.example.finderskeepersapplication.ui.screens
 import com.example.finderskeepersapplication.R
 import com.example.finderskeepersapplication.data.local.AppDatabase
 import com.example.finderskeepersapplication.data.local.ItemEntity
+import com.example.finderskeepersapplication.data.local.ItemStatus
+import com.example.finderskeepersapplication.data.local.SyncStatus
 import com.example.finderskeepersapplication.data.remote.RetrofitClient
 import com.example.finderskeepersapplication.data.repository.FindersKeepersRepository
 import com.example.finderskeepersapplication.domain.model.Resource
@@ -43,6 +45,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.OpenInFull
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.RemoveCircleOutline
@@ -67,6 +70,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -136,14 +140,18 @@ fun DashboardScreen() {
     val navController = rememberNavController()
     val context = LocalContext.current
     val itemDao = remember { AppDatabase.getDatabase(context).itemDao() }
-    val repository = remember { FindersKeepersRepository(itemDao, RetrofitClient.remotePostsApi) }
+    val repository = remember { FindersKeepersRepository(itemDao, RetrofitClient.remotePostsApi, context.applicationContext) }
     val addItemViewModel: AddItemViewModel = viewModel(factory = AddItemViewModelFactory(repository))
+
+    LaunchedEffect(Unit) {
+        com.example.finderskeepersapplication.worker.SyncWorker.schedulePeriodicSync(context.applicationContext)
+        addItemViewModel.syncPending()
+    }
 
     NavHost(navController = navController, startDestination = DashboardRoutes.home) {
         composable(DashboardRoutes.home) {
             var searchQuery by remember { mutableStateOf("") }
             var pendingDeleteItem by remember { mutableStateOf<ItemEntity?>(null) }
-            var showTipsDialog by remember { mutableStateOf(false) }
             val items by addItemViewModel.items.collectAsState(initial = emptyList())
 
             FindersKeepersHomeScreen(
@@ -163,36 +171,15 @@ fun DashboardScreen() {
                 onDeleteItemClick = { item ->
                     pendingDeleteItem = item
                 },
-                onRemotePostsClick = {
-                    showTipsDialog = true
-                    addItemViewModel.loadRemotePosts()
-                }
+                onToggleStatus = { item ->
+                    val newStatus = if (item.itemStatus == ItemStatus.MISSING) ItemStatus.STORED else ItemStatus.MISSING
+                    addItemViewModel.updateItemStatus(item, newStatus)
+                },
+                onSyncClick = {
+                    addItemViewModel.syncPending()
+                },
+                isLoading = addItemViewModel.isLoading
             )
-
-            if (showTipsDialog) {
-                AlertDialog(
-                    onDismissRequest = { showTipsDialog = false },
-                    title = { Text("Sample posts from JSONPlaceholder") },
-                    text = {
-                        Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
-                            when (val state = addItemViewModel.remotePosts) {
-                                null, Resource.Loading -> Text("Loading tips…")
-                                is Resource.Error -> Text("Could not load tips: ${state.message}")
-                                is Resource.Success -> state.data.forEach { tip ->
-                                    Text(tip.title.replaceFirstChar { it.uppercase() }, fontWeight = FontWeight.Bold)
-                                    Spacer(Modifier.height(4.dp))
-                                    Text(tip.description)
-                                    Spacer(Modifier.height(12.dp))
-                                }
-                            }
-                        }
-                    },
-                    confirmButton = { TextButton(onClick = { showTipsDialog = false }) { Text("Close") } },
-                    dismissButton = {
-                        TextButton(onClick = { addItemViewModel.loadRemotePosts() }) { Text("Retry") }
-                    }
-                )
-            }
 
             pendingDeleteItem?.let { item ->
                 AlertDialog(
@@ -223,21 +210,21 @@ fun DashboardScreen() {
                 viewModel = addItemViewModel
             )
         }
-        composable(DashboardRoutes.addItemDetails) {
-            AddItemScreen(
-                onNextClick = { navController.navigate(DashboardRoutes.captureLocation) },
-                onBackClick = { navController.popBackStack() },
+        composable(DashboardRoutes.captureLocation) {
+            CaptureLocationScreen(
+                onNextClick = { navController.navigate(DashboardRoutes.addItemDetails) },
+                navController = navController,
                 viewModel = addItemViewModel
             )
         }
-        composable(DashboardRoutes.captureLocation) {
-            CaptureLocationScreen(
+        composable(DashboardRoutes.addItemDetails) {
+            AddItemScreen(
                 onConfirmSave = {
                     navController.navigate(DashboardRoutes.success) {
                         popUpTo(DashboardRoutes.home)
                     }
                 },
-                navController = navController,
+                onBackClick = { navController.popBackStack() },
                 viewModel = addItemViewModel
             )
         }
@@ -262,7 +249,10 @@ fun DashboardScreen() {
 
             ItemDetailScreen(
                 item = item,
-                onFinishClick = { navController.popBackStack() }
+                onFinishClick = { navController.popBackStack() },
+                onStatusChange = { newStatus ->
+                    item?.let { addItemViewModel.updateItemStatus(it, newStatus) }
+                }
             )
         }
     }
@@ -279,20 +269,33 @@ private fun FindersKeepersHomeScreen(
     onItemClick: (ItemEntity) -> Unit = {},
     onEditItemClick: (ItemEntity) -> Unit = {},
     onDeleteItemClick: (ItemEntity) -> Unit = {},
-    onRemotePostsClick: () -> Unit = {}
+    onToggleStatus: (ItemEntity) -> Unit = {},
+    onSyncClick: () -> Unit = {},
+    isLoading: Boolean = false
 ) {
     val query = searchQuery.trim()
     val isSearching = query.isNotEmpty()
-    val visibleItems = remember(items, query) {
-        if (query.isEmpty()) {
-            items
-        } else {
-            items.filter {
+    var selectedFilter by remember { mutableStateOf("ALL") }
+
+    val missingItems = remember(items) { items.filter { it.itemStatus == ItemStatus.MISSING } }
+    val missingCount = missingItems.size
+
+    val visibleItems = remember(items, query, selectedFilter) {
+        var result = items
+        if (selectedFilter == "MISSING") {
+            result = result.filter { it.itemStatus == ItemStatus.MISSING }
+        } else if (selectedFilter == "STORED") {
+            result = result.filter { it.itemStatus != ItemStatus.MISSING }
+        }
+
+        if (query.isNotEmpty()) {
+            result = result.filter {
                 it.itemName.contains(query, ignoreCase = true) ||
                         it.room.contains(query, ignoreCase = true) ||
                         it.storageLocation.contains(query, ignoreCase = true)
             }
         }
+        result
     }
 
     Scaffold(
@@ -317,22 +320,103 @@ private fun FindersKeepersHomeScreen(
             Spacer(Modifier.height(dimensionResource(R.dimen.spacing_small)))
             AppTitleBar()
 
+            if (missingCount > 0) {
+                Spacer(Modifier.height(10.dp))
+                Surface(
+                    color = Color(0xFFFFF3E0),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, Color(0xFFFFB74D)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("⚠️", fontSize = 18.sp)
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                text = "$missingCount item${if (missingCount > 1) "s" else ""} marked as MISSING",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = Color(0xFFE65100)
+                            )
+                            Text(
+                                text = "Tap to view lost items you are looking for.",
+                                fontSize = 11.sp,
+                                color = Color(0xFF8D6E63)
+                            )
+                        }
+                        TextButton(onClick = { selectedFilter = "MISSING" }) {
+                            Text("View", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFE65100))
+                        }
+                    }
+                }
+            }
+
             Spacer(Modifier.height(dimensionResource(R.dimen.spacing_large)))
             SearchBar(
                 query = searchQuery,
                 onQueryChange = onSearchQueryChange
             )
 
+            if (isSearching && visibleItems.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("📍", fontSize = 20.sp)
+                        Spacer(Modifier.width(8.dp))
+                        Column {
+                            Text("FindersKeepers Answer:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
+                            Text(
+                                "\"${visibleItems.first().itemName}\" is in ${visibleItems.first().room} → ${visibleItems.first().storageLocation}",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = selectedFilter == "ALL",
+                    onClick = { selectedFilter = "ALL" },
+                    label = { Text("All (${items.size})", fontSize = 12.sp) }
+                )
+                FilterChip(
+                    selected = selectedFilter == "MISSING",
+                    onClick = { selectedFilter = "MISSING" },
+                    label = { Text("Missing ($missingCount)", fontSize = 12.sp) }
+                )
+                FilterChip(
+                    selected = selectedFilter == "STORED",
+                    onClick = { selectedFilter = "STORED" },
+                    label = { Text("Stored (${items.size - missingCount})", fontSize = 12.sp) }
+                )
+            }
+
             Spacer(Modifier.height(12.dp))
-            OutlinedButton(onClick = onRemotePostsClick, modifier = Modifier.fillMaxWidth()) {
-                Text("Load sample API posts (Retrofit demo)")
+            OutlinedButton(
+                onClick = onSyncClick,
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isLoading
+            ) {
+                Icon(Icons.Filled.Refresh, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text(if (isLoading) "Syncing with Cloud…" else "Sync with Cloud (MockAPI & Cloudinary)")
             }
 
             Spacer(Modifier.height(dimensionResource(R.dimen.spacing_xlarge)))
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
             Spacer(Modifier.height(dimensionResource(R.dimen.spacing_medium)))
-            SectionHeader(text = if (isSearching) "MATCHES" else "RECENTLY STORED")
+            SectionHeader(text = if (isSearching) "MATCHES" else if (selectedFilter == "MISSING") "MISSING ITEMS" else "RECENTLY STORED")
 
             Spacer(Modifier.height(dimensionResource(R.dimen.spacing_medium)))
             if (visibleItems.isEmpty()) {
@@ -340,7 +424,7 @@ private fun FindersKeepersHomeScreen(
                     text = if (items.isEmpty())
                         "Nothing stored yet — tap + to log your first item."
                     else
-                        "No items match \"$query\".",
+                        "No items match this filter.",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -351,7 +435,8 @@ private fun FindersKeepersHomeScreen(
                             item = item,
                             onClick = { onItemClick(item) },
                             onEditClick = { onEditItemClick(item) },
-                            onDeleteClick = { onDeleteItemClick(item) }
+                            onDeleteClick = { onDeleteItemClick(item) },
+                            onToggleStatus = { onToggleStatus(item) }
                         )
                     }
                 }
@@ -380,8 +465,10 @@ private fun RecentItemCard(
     item: ItemEntity,
     onClick: () -> Unit,
     onEditClick: () -> Unit,
-    onDeleteClick: () -> Unit
+    onDeleteClick: () -> Unit,
+    onToggleStatus: (ItemEntity) -> Unit
 ) {
+    val isMissing = item.itemStatus == ItemStatus.MISSING
     Surface(
         onClick = onClick,
         color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
@@ -392,14 +479,15 @@ private fun RecentItemCard(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(dimensionResource(R.dimen.spacing_medium))
         ) {
+            val displayImage = item.imageUri?.ifBlank { null } ?: item.imageUrlRemote?.ifBlank { null }
             Surface(
                 color = Color.White,
                 shape = RoundedCornerShape(dimensionResource(R.dimen.corner_radius_small)),
                 modifier = Modifier.size(dimensionResource(R.dimen.thumbnail_size))
             ) {
-                if (item.imageUri != null) {
+                if (displayImage != null) {
                     AsyncImage(
-                        model = Uri.parse(item.imageUri),
+                        model = displayImage,
                         contentDescription = item.itemName,
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop
@@ -416,12 +504,63 @@ private fun RecentItemCard(
                     text = item.itemName.ifBlank { "Unnamed item" },
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.primary,
-                    fontSize = 15.sp
+                    fontSize = 15.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
+                Spacer(Modifier.height(2.dp))
                 Text(
                     text = "${item.room} • ${item.storageLocation.ifBlank { "No details" }}",
                     fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                Spacer(Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(
+                        color = if (isMissing) Color(0xFFFFEBEE) else Color(0xFFE8F5E9),
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Text(
+                            text = if (isMissing) "⚠️ MISSING" else "✓ STORED",
+                            color = if (isMissing) Color(0xFFC62828) else Color(0xFF2E7D32),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+
+                    Spacer(Modifier.width(8.dp))
+
+                    val syncColor = when (item.syncStatus) {
+                        SyncStatus.PENDING -> Color(0xFFFFA726)
+                        SyncStatus.SYNCING -> Color(0xFF42A5F5)
+                        SyncStatus.SYNCED -> Color(0xFF66BB6A)
+                    }
+
+                    Text(
+                        text = when (item.syncStatus) {
+                            SyncStatus.PENDING -> "Pending"
+                            SyncStatus.SYNCING -> "Syncing"
+                            SyncStatus.SYNCED -> "Synced"
+                        },
+                        color = syncColor,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+            TextButton(
+                onClick = { onToggleStatus(item) },
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+            ) {
+                Text(
+                    text = if (item.itemStatus == ItemStatus.MISSING) "I Found It!" else "Mark Lost",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (item.itemStatus == ItemStatus.MISSING) Color(0xFF2E7D32) else Color(0xFFC62828)
                 )
             }
             IconButton(onClick = onEditClick, modifier = Modifier.size(32.dp)) {
@@ -647,7 +786,7 @@ private fun SelectRoomScreen(
         Spacer(Modifier.height(dimensionResource(R.dimen.spacing_medium)))
         Button(
             onClick = {
-                navController.navigate(DashboardRoutes.addItemDetails)
+                navController.navigate(DashboardRoutes.captureLocation)
             },
             enabled = selectedRoom != null,
             colors = ButtonDefaults.buttonColors(
@@ -797,7 +936,7 @@ private fun SelectedRoomChip(room: String?) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddItemScreen(
-    onNextClick: () -> Unit,
+    onConfirmSave: () -> Unit,
     onBackClick: () -> Unit,
     viewModel: AddItemViewModel
 ) {
@@ -894,6 +1033,61 @@ fun AddItemScreen(
             }
         )
 
+        if (viewModel.isSuggesting) {
+            Spacer(Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+                Text("AI analyzing photo…", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+            }
+        } else if (viewModel.suggestedName != null) {
+            Spacer(Modifier.height(6.dp))
+            Surface(
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("AI Suggestion: \"${viewModel.suggestedName}\"",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(
+                        onClick = { viewModel.applySuggestion() },
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) {
+                        Text("Apply", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                    TextButton(
+                        onClick = { viewModel.dismissSuggestion() },
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) {
+                        Text("Dismiss", fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+
+        viewModel.suggestedTags?.let { tags ->
+            if (tags.isNotEmpty()) {
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("AI Tags:", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    tags.take(3).forEach { tag ->
+                        SuggestionChip(
+                            onClick = { viewModel.applyTag(tag) },
+                            label = { Text("+ $tag", fontSize = 11.sp) }
+                        )
+                    }
+                }
+            }
+        }
+
         Spacer(Modifier.height(dimensionResource(R.dimen.spacing_medium)))
         OutlinedTextField(
             value = viewModel.storageLocation,
@@ -926,11 +1120,11 @@ fun AddItemScreen(
 
         Spacer(Modifier.weight(1f))
 
-        StepDots(activeIndex = 1, totalSteps = 3)
+        StepDots(activeIndex = 2, totalSteps = 3)
 
         Spacer(Modifier.height(dimensionResource(R.dimen.spacing_medium)))
         Button(
-            onClick = onNextClick,
+            onClick = { viewModel.saveItem(); onConfirmSave() },
             enabled = viewModel.itemName.isNotBlank() && viewModel.storageLocation.isNotBlank(),
             colors = ButtonDefaults.buttonColors(
                 containerColor = MaterialTheme.colorScheme.primary,
@@ -942,7 +1136,7 @@ fun AddItemScreen(
                 .fillMaxWidth()
                 .height(dimensionResource(R.dimen.button_height))
         ) {
-            Text("Next", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text("Confirm & Save", fontSize = 16.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(dimensionResource(R.dimen.spacing_xlarge)))
     }
@@ -959,7 +1153,7 @@ private fun fileUri(context: Context, file: File): Uri =
 
 @Composable
 private fun CaptureLocationScreen(
-    onConfirmSave: () -> Unit,
+    onNextClick: () -> Unit,
     navController: NavHostController,
     viewModel: AddItemViewModel
 ) {
@@ -969,7 +1163,7 @@ private fun CaptureLocationScreen(
     var cameraPermissionGranted by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
     }
-    var cameraActive by remember { mutableStateOf(cameraPermissionGranted) }
+    var cameraActive by remember { mutableStateOf(capturedImageUri == null && cameraPermissionGranted) }
     var cameraError by remember { mutableStateOf<String?>(null) }
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
@@ -1071,7 +1265,7 @@ private fun CaptureLocationScreen(
                             capture.takePicture(options, cameraExecutor, object : ImageCapture.OnImageSavedCallback {
                                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                                     android.os.Handler(context.mainLooper).post {
-                                        viewModel.setCapturedImage(fileUri(context, file))
+                                        viewModel.setCapturedImage(fileUri(context, file), context)
                                         cameraActive = false
                                         cameraError = null
                                     }
@@ -1096,14 +1290,14 @@ private fun CaptureLocationScreen(
             Text("Photo captured ✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
         }
         Spacer(Modifier.weight(0.2f))
-        StepDots(activeIndex = 2, totalSteps = 3)
+        StepDots(activeIndex = 1, totalSteps = 3)
         Spacer(Modifier.height(dimensionResource(R.dimen.spacing_medium)))
         Button(
-            onClick = { viewModel.saveItem(); onConfirmSave() },
+            onClick = onNextClick,
             enabled = capturedImageUri != null,
             modifier = Modifier.fillMaxWidth().height(dimensionResource(R.dimen.button_height)),
             shape = RoundedCornerShape(dimensionResource(R.dimen.corner_radius_small))
-        ) { Text("Confirm & Save", fontSize = 16.sp, fontWeight = FontWeight.Bold) }
+        ) { Text("Next", fontSize = 16.sp, fontWeight = FontWeight.Bold) }
         Spacer(Modifier.height(dimensionResource(R.dimen.spacing_xlarge)))
     }
 }
@@ -1231,7 +1425,8 @@ private fun SuccessScreen(
             }
         }
 
-        if (item?.imageUri != null) {
+        val displayImage = item?.imageUri?.ifBlank { null } ?: item?.imageUrlRemote?.ifBlank { null }
+        if (displayImage != null) {
             Spacer(Modifier.height(dimensionResource(R.dimen.spacing_large)))
             Text(
                 text = "Attached Image:",
@@ -1249,7 +1444,7 @@ private fun SuccessScreen(
                     .height(220.dp)
             ) {
                 AsyncImage(
-                    model = Uri.parse(item.imageUri),
+                    model = displayImage,
                     contentDescription = "Attached storage location photo",
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop
@@ -1293,7 +1488,8 @@ private fun SuccessDetailRow(label: String, value: String) {
 @Composable
 private fun ItemDetailScreen(
     item: ItemEntity?,
-    onFinishClick: () -> Unit
+    onFinishClick: () -> Unit,
+    onStatusChange: (ItemStatus) -> Unit = {}
 ) {
     var showFullScreenImage by remember { mutableStateOf(false) }
 
@@ -1346,10 +1542,31 @@ private fun ItemDetailScreen(
                     label = "Storage Location",
                     value = item?.storageLocation?.ifBlank { "—" } ?: "—"
                 )
+                Spacer(Modifier.height(dimensionResource(R.dimen.spacing_small)))
+                SuccessDetailRow(
+                    label = "Status",
+                    value = if (item?.itemStatus == ItemStatus.MISSING) "⚠️ MISSING / LOST" else "STORED"
+                )
             }
         }
 
-        if (item?.imageUri != null) {
+        Spacer(Modifier.height(12.dp))
+        OutlinedButton(
+            onClick = {
+                val newStatus = if (item?.itemStatus == ItemStatus.MISSING) ItemStatus.STORED else ItemStatus.MISSING
+                onStatusChange(newStatus)
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = if (item?.itemStatus == ItemStatus.MISSING) "I Found It! (Mark Stored)" else "Mark as Missing / Lost",
+                fontWeight = FontWeight.Bold,
+                color = if (item?.itemStatus == ItemStatus.MISSING) Color(0xFF2E7D32) else Color(0xFFC62828)
+            )
+        }
+
+        val displayImage = item?.imageUri?.ifBlank { null } ?: item?.imageUrlRemote?.ifBlank { null }
+        if (displayImage != null) {
             Spacer(Modifier.height(dimensionResource(R.dimen.spacing_large)))
             Text(
                 text = "Attached Image:",
@@ -1369,7 +1586,7 @@ private fun ItemDetailScreen(
                         .height(220.dp)
                 ) {
                     AsyncImage(
-                        model = Uri.parse(item.imageUri),
+                        model = displayImage,
                         contentDescription = "Attached storage location photo",
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop
@@ -1416,16 +1633,17 @@ private fun ItemDetailScreen(
         Spacer(Modifier.height(dimensionResource(R.dimen.spacing_xlarge)))
     }
 
-    if (showFullScreenImage && item?.imageUri != null) {
+    val displayImage = item?.imageUri?.ifBlank { null } ?: item?.imageUrlRemote?.ifBlank { null }
+    if (showFullScreenImage && displayImage != null) {
         FullScreenImageViewer(
-            uri = Uri.parse(item.imageUri),
+            imageModel = displayImage,
             onDismiss = { showFullScreenImage = false }
         )
     }
 }
 
 @Composable
-private fun FullScreenImageViewer(uri: Uri, onDismiss: () -> Unit) {
+private fun FullScreenImageViewer(imageModel: String, onDismiss: () -> Unit) {
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -1441,7 +1659,7 @@ private fun FullScreenImageViewer(uri: Uri, onDismiss: () -> Unit) {
                 )
         ) {
             AsyncImage(
-                model = uri,
+                model = imageModel,
                 contentDescription = "Attached storage location photo, full screen",
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Fit
