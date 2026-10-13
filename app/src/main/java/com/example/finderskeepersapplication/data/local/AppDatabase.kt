@@ -5,8 +5,8 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
-// bumped DB version to 2 because we'll add new columns to ItemEntity
-@Database(entities = [ItemEntity::class], version = 2, exportSchema = false)
+// bumped DB version to 3 because we added itemStatus column to ItemEntity
+@Database(entities = [ItemEntity::class], version = 3, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun itemDao(): ItemDao
 

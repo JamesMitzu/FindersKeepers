@@ -10,8 +10,10 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface ItemDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insert(item: ItemEntity)
+    // Return the new rowId so repository can use it if needed
+    // Changed to IGNORE so we don't accidentally replace/delete existing rows when unique remoteId matches
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insert(item: ItemEntity): Long
 
     @Update
     suspend fun update(item: ItemEntity)
@@ -31,4 +33,7 @@ interface ItemDao {
     @Query("SELECT * FROM items WHERE id = :id LIMIT 1")
     suspend fun getItemById(id: Int): ItemEntity?
 
+    // Add this query to check for existing remote items during sync
+    @Query("SELECT * FROM items WHERE remoteId = :remoteId LIMIT 1")
+    suspend fun getItemByRemoteId(remoteId: String?): ItemEntity?
 }

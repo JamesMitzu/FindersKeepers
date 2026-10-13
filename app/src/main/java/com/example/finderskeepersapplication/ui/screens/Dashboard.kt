@@ -469,53 +469,70 @@ private fun RecentItemCard(
     onToggleStatus: (ItemEntity) -> Unit
 ) {
     val isMissing = item.itemStatus == ItemStatus.MISSING
+
     Surface(
         onClick = onClick,
-        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
         shape = RoundedCornerShape(dimensionResource(R.dimen.corner_radius_medium)),
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(dimensionResource(R.dimen.spacing_medium))
+            modifier = Modifier
+                .padding(dimensionResource(R.dimen.spacing_medium))
+                .fillMaxWidth()
         ) {
+            // Thumbnail
             val displayImage = item.imageUri?.ifBlank { null } ?: item.imageUrlRemote?.ifBlank { null }
             Surface(
                 color = Color.White,
-                shape = RoundedCornerShape(dimensionResource(R.dimen.corner_radius_small)),
-                modifier = Modifier.size(dimensionResource(R.dimen.thumbnail_size))
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier
+                    .size(72.dp)
+                    .clip(RoundedCornerShape(8.dp))
             ) {
                 if (displayImage != null) {
                     AsyncImage(
                         model = displayImage,
-                        contentDescription = item.itemName,
+                        contentDescription = item.itemName.ifBlank { "Item image" },
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop
                     )
                 } else {
                     Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                        Icon(Icons.Filled.Inventory2, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Icon(
+                            Icons.Filled.Inventory2,
+                            contentDescription = "No image",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(28.dp)
+                        )
                     }
                 }
             }
+
             Spacer(Modifier.width(dimensionResource(R.dimen.spacing_medium)))
-            Column(modifier = Modifier.weight(1f)) {
+
+            // Main information column
+            Column(modifier = Modifier
+                .weight(1f)
+                .padding(end = 8.dp)
+            ) {
+                // Title + sync status on same row
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
                         text = item.itemName.ifBlank { "Unnamed item" },
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.primary,
-                        fontSize = 15.sp,
+                        fontSize = 16.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
+                        modifier = Modifier.weight(1f)
                     )
 
-                    Spacer(Modifier.width(6.dp))
+                    Spacer(Modifier.width(8.dp))
 
                     val syncColor = when (item.syncStatus) {
                         SyncStatus.PENDING -> Color(0xFFFFA726)
@@ -530,60 +547,92 @@ private fun RecentItemCard(
                             SyncStatus.SYNCED -> "● Synced"
                         },
                         color = syncColor,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
                     )
                 }
 
-                Spacer(Modifier.height(2.dp))
+                Spacer(Modifier.height(6.dp))
+
+                // Subtitle: room • storage
                 Text(
                     text = "${item.room} • ${item.storageLocation.ifBlank { "No details" }}",
-                    fontSize = 12.sp,
+                    fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
 
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(8.dp))
+
+                // Status chip
                 Surface(
                     color = if (isMissing) Color(0xFFFFEBEE) else Color(0xFFE8F5E9),
-                    shape = RoundedCornerShape(4.dp)
+                    shape = RoundedCornerShape(6.dp)
                 ) {
                     Text(
                         text = if (isMissing) "⚠️ MISSING" else "✓ STORED",
                         color = if (isMissing) Color(0xFFC62828) else Color(0xFF2E7D32),
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                     )
                 }
             }
-            TextButton(
-                onClick = { onToggleStatus(item) },
-                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+
+            // Actions column (stacked icons)
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier
             ) {
-                Text(
-                    text = if (item.itemStatus == ItemStatus.MISSING) "I Found It!" else "Mark Lost",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = if (item.itemStatus == ItemStatus.MISSING) Color(0xFF2E7D32) else Color(0xFFC62828)
-                )
-            }
-            IconButton(onClick = onEditClick, modifier = Modifier.size(32.dp)) {
-                Icon(
-                    Icons.Filled.Edit,
-                    contentDescription = "Edit ${item.itemName}",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-            IconButton(onClick = onDeleteClick, modifier = Modifier.size(32.dp)) {
-                Icon(
-                    Icons.Filled.Delete,
-                    contentDescription = "Delete ${item.itemName}",
-                    tint = Color(0xFFC9752F),
-                    modifier = Modifier.size(18.dp)
-                )
+                // Toggle status (I Found It / Mark Lost)
+                IconButton(
+                    onClick = { onToggleStatus(item) },
+                    modifier = Modifier
+                        .size(36.dp)
+                        .background(Color.Transparent, shape = CircleShape)
+                ) {
+                    if (isMissing) {
+                        Icon(
+                            imageVector = Icons.Filled.Check,
+                            contentDescription = "Mark found: ${item.itemName}",
+                            tint = Color(0xFF2E7D32),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = "Mark lost: ${item.itemName}",
+                            tint = Color(0xFFC62828),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+
+                IconButton(
+                    onClick = onEditClick,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Edit,
+                        contentDescription = "Edit ${item.itemName}",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                IconButton(
+                    onClick = onDeleteClick,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Delete,
+                        contentDescription = "Delete ${item.itemName}",
+                        tint = Color(0xFFC9752F),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
             }
         }
     }

@@ -11,15 +11,23 @@ import kotlinx.coroutines.tasks.await
 
 object ImageAnalysisHelper {
 
-    suspend fun labelImage(context: Context, uri: Uri): List<String> {
+    data class LabelResult(
+        val text: String,
+        val confidence: Float
+    )
+
+    suspend fun labelImage(context: Context, uri: Uri): List<LabelResult> {
         return try {
             val image = InputImage.fromFilePath(context, uri)
             val options = ImageLabelerOptions.Builder()
-                .setConfidenceThreshold(0.65f)
+                .setConfidenceThreshold(0.55f)
                 .build()
             val labeler = ImageLabeling.getClient(options)
             val labels = labeler.process(image).await()
-            labels.sortedByDescending { it.confidence }.map { it.text }
+
+            labels
+                .sortedByDescending { it.confidence }
+                .map { LabelResult(it.text, it.confidence) }
         } catch (e: Exception) {
             emptyList()
         }
@@ -36,28 +44,58 @@ object ImageAnalysisHelper {
         }
     }
 
-    fun chooseBestName(labels: List<String>, ocrText: String): String? {
-        val ocrLines = ocrText.lines()
+    fun chooseBestName(
+        labels: List<LabelResult>,
+        ocrText: String
+    ): String? {
+
+        val ocrCandidates = ocrText.lines()
             .map { it.trim() }
-            .filter { line -> line.length in 3..25 && line.any { it.isLetter() } }
-        val prominentOcr = ocrLines.firstOrNull()
+            .filter { line ->
+                line.length in 3..32 &&
+                        line.any { it.isLetter() } &&
+                        !line.matches(Regex("(?i).*(www\\.|https?://|©|®|™|page\\s*\\d+|slide|isbn).*"))
+            }
+            .distinct()
+
+        val goodOcr = ocrCandidates.firstOrNull { candidate ->
+            val words = candidate.split(Regex("\\s+"))
+            words.size in 1..4 &&
+                    candidate.first().isUpperCase() &&
+                    !candidate.all { it.isUpperCase() }
+        }
 
         val genericLabels = setOf(
             "material", "font", "rectangle", "space", "gas", "line", "parallel", "circle",
             "graphics", "symmetry", "pattern", "room", "floor", "wall", "ceiling", "building",
             "furniture", "wood", "table", "surface", "indoor", "shadow", "light", "design",
-            "woodwork", "steel", "grey", "black", "white", "yellow", "red", "blue", "green",
-            "brown", "purple", "pink", "orange", "silver", "gold", "color", "style", "shape",
-            "square", "texture", "technology", "gadget", "object", "item", "thing"
+            "woodwork", "steel", "grey", "gray", "black", "white", "yellow", "red", "blue",
+            "green", "brown", "purple", "pink", "orange", "silver", "gold", "color", "style",
+            "shape", "square", "texture", "technology", "gadget", "object", "item", "thing",
+            "product", "packaging", "plastic", "metal", "glass", "paper", "cardboard",
+            "background", "photograph", "image", "picture", "photo", "screenshot"
         )
-        val relevantLabels = labels.filter { it.lowercase().trim() !in genericLabels }
 
-        val topLabel = relevantLabels.firstOrNull() ?: labels.firstOrNull()
+        val relevantLabels = labels
+            .filter { it.text.lowercase().trim() !in genericLabels }
+            .sortedByDescending { it.confidence }
+
+        val topRelevant = relevantLabels.firstOrNull()
+        val topAny = labels.firstOrNull()
 
         return when {
-            !prominentOcr.isNullOrBlank() -> prominentOcr
-            !topLabel.isNullOrBlank() -> topLabel
+            goodOcr != null -> goodOcr
+            topRelevant != null && topRelevant.confidence >= 0.75f -> topRelevant.text
+            ocrCandidates.isNotEmpty() -> ocrCandidates.first()
+            topRelevant != null -> topRelevant.text
+            topAny != null -> topAny.text
             else -> null
         }
+    }
+
+    suspend fun suggestItemName(context: Context, uri: Uri): String? {
+        val labels = labelImage(context, uri)
+        val ocr = recognizeText(context, uri)
+        return chooseBestName(labels, ocr)
     }
 }

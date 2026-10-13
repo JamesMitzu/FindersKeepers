@@ -26,13 +26,19 @@ class FindersKeepersRepository(
 
     val localItems: Flow<List<ItemEntity>> = itemDao.getAllItems()
 
-    suspend fun saveItem(item: ItemEntity) = withContext(Dispatchers.IO) {
+    // In FindersKeepersRepository.kt
+    suspend fun saveItem(item: ItemEntity): Long = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
         val toSave = item.copy(
             lastUpdated = now,
             syncStatus = SyncStatus.PENDING
         )
-        if (toSave.id == 0) itemDao.insert(toSave) else itemDao.update(toSave)
+        if (toSave.id == 0) {
+            itemDao.insert(toSave) // This now returns the new Long ID
+        } else {
+            itemDao.update(toSave)
+            toSave.id.toLong()     // Return existing ID
+        }
     }
 
     suspend fun deleteItem(item: ItemEntity) = withContext(Dispatchers.IO) {
@@ -131,12 +137,17 @@ class FindersKeepersRepository(
             val remoteList = postsApi.getItems()
             for (remote in remoteList) {
                 if (remote.itemName.isNotBlank()) {
-                    val currentLocalList = itemDao.getAllItemsList()
-                    val existing = currentLocalList.find {
-                        (it.remoteId != null && it.remoteId == remote.id) ||
-                        (it.itemName.trim().equals(remote.itemName.trim(), ignoreCase = true) &&
-                         it.room.trim().equals(remote.room.trim(), ignoreCase = true) &&
-                         it.storageLocation.trim().equals(remote.storageLocation.trim(), ignoreCase = true))
+                    // 1. Prefer checking DB by remoteId first
+                    val existingByRemote = remote.id?.let { itemDao.getItemByRemoteId(it) }
+
+                    // 2. Fallback to matching by fields if remoteId is missing locally
+                    val existing = existingByRemote ?: run {
+                        val currentLocalList = itemDao.getAllItemsList()
+                        currentLocalList.find {
+                            it.itemName.trim().equals(remote.itemName.trim(), ignoreCase = true) &&
+                                    it.room.trim().equals(remote.room.trim(), ignoreCase = true) &&
+                                    it.storageLocation.trim().equals(remote.storageLocation.trim(), ignoreCase = true)
+                        }
                     }
 
                     val parsedStatus = try {
@@ -157,15 +168,15 @@ class FindersKeepersRepository(
                                 itemStatus = parsedStatus
                             )
                         )
-                    } else if (existing.remoteId.isNullOrBlank() && !remote.id.isNullOrBlank()) {
-                        itemDao.update(
-                            existing.copy(
-                                remoteId = remote.id,
-                                imageUrlRemote = existing.imageUrlRemote ?: remote.imageUrl,
-                                syncStatus = SyncStatus.SYNCED,
-                                itemStatus = parsedStatus
-                            )
+                    } else {
+                        // 3. Ensure remoteId and imageUrlRemote / status are up-to-date without making a new duplicate row
+                        val updated = existing.copy(
+                            remoteId = existing.remoteId ?: remote.id,
+                            imageUrlRemote = existing.imageUrlRemote ?: remote.imageUrl,
+                            itemStatus = parsedStatus,
+                            syncStatus = SyncStatus.SYNCED
                         )
+                        itemDao.update(updated)
                     }
                 }
             }

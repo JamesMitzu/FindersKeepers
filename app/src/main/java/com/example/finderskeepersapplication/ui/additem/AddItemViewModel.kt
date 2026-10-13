@@ -153,9 +153,13 @@ class AddItemViewModel(private val repository: FindersKeepersRepository) : ViewM
             try {
                 val labels = com.example.finderskeepersapplication.util.ImageAnalysisHelper.labelImage(context, uri)
                 val ocr = com.example.finderskeepersapplication.util.ImageAnalysisHelper.recognizeText(context, uri)
-                suggestedTags = labels.take(5)
+
+                // Convert LabelResult → String for the UI
+                suggestedTags = labels.take(5).map { it.text }
+
                 val best = com.example.finderskeepersapplication.util.ImageAnalysisHelper.chooseBestName(labels, ocr)
                 suggestedName = best
+
                 if (itemName.isBlank() && !best.isNullOrBlank()) {
                     itemName = best
                 }
